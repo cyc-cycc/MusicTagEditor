@@ -9,10 +9,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
@@ -25,9 +25,9 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Build .app with PyInstaller (using spec file)
+      - name: Build .app with PyInstaller (use spec file)
         run: |
-          pyinstaller --windowed --name "MusicTagEditor" tag.spec
+          pyinstaller tag.spec   # 这里不再加额外参数
 
       - name: Create DMG package
         run: |
@@ -38,8 +38,7 @@ jobs:
                          -ov -format UDZO \
                          MusicTagEditor.dmg
 
-      # ===== 主要修改点：将 actions/upload-artifact 从 v3 升级到 v4 =====
-      - name: Archive build artifacts（.app 和 .dmg）
+      - name: Archive build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: MusicTagEditor-macOS
