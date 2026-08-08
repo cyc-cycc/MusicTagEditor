@@ -29,22 +29,19 @@ jobs:
         run: |
           pyinstaller --windowed --name "MusicTagEditor" tag.spec
 
-      # ===== 新增：创建 DMG =====
       - name: Create DMG package
         run: |
-          # 创建临时文件夹并放入 .app
           mkdir -p dmg_staging
           cp -R dist/MusicTagEditor.app dmg_staging/
-          # 使用 hdiutil 生成压缩的 DMG（UDZO 格式）
           hdiutil create -volname "MusicTagEditor" \
                          -srcfolder dmg_staging \
                          -ov -format UDZO \
                          MusicTagEditor.dmg
 
+      # ===== 主要修改点：将 actions/upload-artifact 从 v3 升级到 v4 =====
       - name: Archive build artifacts（.app 和 .dmg）
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: MusicTagEditor-macOS
           path: |
-            dist/MusicTagEditor.app
             MusicTagEditor.dmg
