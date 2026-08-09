@@ -13,9 +13,9 @@ from PyQt5.QtWidgets import (
     QLabel, QLineEdit, QGroupBox, QFormLayout, QFileDialog,
     QMessageBox, QSplitter, QProgressDialog, QCheckBox, QTextEdit,
     QAction, QStatusBar, QMenu, QMenuBar, QComboBox, QFrame,
-    QSizePolicy, QGraphicsDropShadowEffect
+    QSizePolicy, QGraphicsDropShadowEffect, QSlider
 )
-from PyQt5.QtCore import Qt, QSize, pyqtSignal, QThread, QPoint, QRect, QTimer
+from PyQt5.QtCore import Qt, QSize, pyqtSignal, QThread, QPoint, QRect, QTimer, QEvent
 from PyQt5.QtGui import QFont, QColor, QPalette, QIcon, QPixmap, QPainterPath, QRegion
 
 import taglib
@@ -292,6 +292,23 @@ def get_global_stylesheet(theme_name: str = 'light', bg_opacity: float = 0.85) -
         selection-background-color: {primary};
         selection-color: white;
     }}
+    /* 滑块样式*/
+    QSlider::groove:horizontal {{
+        height: 6px;
+        background: {border};
+        border-radius: 3px;
+    }}
+    QSlider::handle:horizontal {{
+        background: {primary};
+        width: 14px;
+        height: 14px;
+        margin: -4px 0;
+        border-radius: 7px;
+    }}
+    QSlider::sub-page:horizontal {{
+        background: {primary};
+        border-radius: 3px;
+    }}
     /* 滚动条滑块在暗色下稍亮 */
     QScrollBar::handle:vertical, QScrollBar::handle:horizontal {{
         background: rgba(200,200,200,150);
@@ -329,17 +346,10 @@ def get_global_stylesheet(theme_name: str = 'light', bg_opacity: float = 0.85) -
 
 # ==================== 编码工具函数 ====================
 def decode_tag_value(value, encoding: str) -> str:
-    """
-    将标签值按指定编码解码为字符串。
-    如果 value 已经是 str，尝试用指定编码重新编码再解码（处理乱码情况）。
-    如果解码失败，返回原值。
-    """
     if not value:
         return value
     if isinstance(value, str):
-        # 如果已经是字符串但可能是乱码，尝试用指定编码重新处理
         try:
-            # 先编码为 Latin1 保留原始字节，再用目标编码解码
             raw_bytes = value.encode('latin1')
             return raw_bytes.decode(encoding)
         except (UnicodeDecodeError, UnicodeEncodeError):
@@ -353,21 +363,15 @@ def decode_tag_value(value, encoding: str) -> str:
 
 
 def encode_tag_value(value: str, encoding: str) -> str:
-    """
-    将字符串按指定编码编码后再解码为 Latin1，以便写入标签时保持正确的字节。
-    如果编码失败，返回原值。
-    """
     if not value:
         return value
     try:
-        # 先编码为目标编码，再解码为 Latin1 以保留字节
         return value.encode(encoding).decode('latin1')
     except (UnicodeEncodeError, UnicodeDecodeError):
         return value
 
 
 def decode_tags(tags: dict, encoding: str) -> dict:
-    """递归解码标签字典中的所有字符串值"""
     if not encoding or encoding == 'UTF-8':
         return tags
     decoded = {}
@@ -380,7 +384,6 @@ def decode_tags(tags: dict, encoding: str) -> dict:
 
 
 def encode_tags_for_save(tags: dict, encoding: str) -> dict:
-    """将标签字典中的所有字符串值按指定编码编码，准备写入"""
     if not encoding or encoding == 'UTF-8':
         return tags
     encoded = {}
@@ -419,7 +422,6 @@ class LoadFilesThread(QThread):
             try:
                 with taglib.File(file_path) as song:
                     tags = dict(song.tags)
-                    # 应用编码解码
                     if self.encoding and self.encoding != 'UTF-8':
                         tags = decode_tags(tags, self.encoding)
                     length = int(song.length) if song.length is not None else 0
@@ -445,7 +447,7 @@ class MusicTagEditor(QMainWindow):
         self.is_loading = False
         self.current_theme = 'light'
         self.bg_opacity = 0.85
-        self.current_encoding = 'UTF-8'  # 默认编码
+        self.current_encoding = 'UTF-8'
 
         # 拖拽相关
         self.drag_pos = QPoint()
@@ -454,10 +456,94 @@ class MusicTagEditor(QMainWindow):
         self._init_ui()
         self._setup_actions()
         self._setup_statusbar()
+
+        # 加载设置（需在 UI 构建后，应用主题前）
+        self.load_settings()
+
+        # 应用主题（会使用加载的 self.current_theme 和 self.bg_opacity）
         self._apply_theme(self.current_theme)
 
+    # ---------- 配置管理 ----------
+    def _get_config_dir(self):
+        base_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+        return os.path.join(base_dir, '.CME')
+
+    def _get_config_path(self):
+        return os.path.join(self._get_config_dir(), 'config.json')
+
+    def load_settings(self):
+        config_path = self._get_config_path()
+        if not os.path.exists(config_path):
+            return
+
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+
+            # 主题
+            theme = config.get('theme', 'light')
+            if theme in ('light', 'dark'):
+                self.current_theme = theme
+
+            # 编码
+            encoding = config.get('encoding', 'UTF-8')
+            self.current_encoding = encoding
+            self.encoding_combo.blockSignals(True)
+            idx = self.encoding_combo.findText(encoding)
+            if idx >= 0:
+                self.encoding_combo.setCurrentIndex(idx)
+            self.encoding_combo.blockSignals(False)
+
+            # 透明度 (存储为整数百分比 50~100)
+            opacity = config.get('bg_opacity', 85)
+            if 50 <= opacity <= 100:
+                self.bg_opacity = opacity / 100.0
+                self.opacity_slider.blockSignals(True)
+                self.opacity_slider.setValue(opacity)
+                self.opacity_slider.blockSignals(False)
+                self.opacity_label.setText(f"{opacity}%")
+
+            # 窗口几何和最大化
+            maximized = config.get('maximized', False)
+            geometry = config.get('geometry')
+            if maximized:
+                self.showMaximized()
+            elif geometry and isinstance(geometry, dict):
+                x = geometry.get('x')
+                y = geometry.get('y')
+                w = geometry.get('width')
+                h = geometry.get('height')
+                if all(v is not None for v in (x, y, w, h)):
+                    self.setGeometry(x, y, w, h)
+        except Exception:
+            pass
+
+    def save_settings(self):
+        config_dir = self._get_config_dir()
+        os.makedirs(config_dir, exist_ok=True)
+        config_path = self._get_config_path()
+
+        config = {
+            'theme': self.current_theme,
+            'encoding': self.current_encoding,
+            'bg_opacity': int(self.bg_opacity * 100),
+            'maximized': self.isMaximized(),
+            'geometry': {
+                'x': self.x(),
+                'y': self.y(),
+                'width': self.width(),
+                'height': self.height()
+            }
+        }
+        try:
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=4, ensure_ascii=False)
+        except Exception:
+            pass
+
+    # ---------- UI 构建 ----------
     def _init_ui(self):
-        self.setWindowTitle("🎵 音乐标签编辑器")
+        self.setWindowTitle("📝 音乐标签编辑器")
         self.setMinimumSize(1200, 750)
         self.resize(1200, 750)
 
@@ -469,25 +555,28 @@ class MusicTagEditor(QMainWindow):
         main_layout.setSpacing(0)
 
         # 标题栏
-        title_bar = QWidget()
-        title_bar.setObjectName("titleBar")
-        title_bar.setFixedHeight(50)
-        title_bar.mousePressEvent = self._title_mouse_press
-        title_bar.mouseMoveEvent = self._title_mouse_move
-        title_bar.mouseReleaseEvent = self._title_mouse_release
+        self.title_bar = QWidget()
+        self.title_bar.setObjectName("titleBar")
+        self.title_bar.setFixedHeight(50)
+        # 安装事件过滤器以捕捉双击
+        self.title_bar.installEventFilter(self)
+        # 鼠标事件用于拖动
+        self.title_bar.mousePressEvent = self._title_mouse_press
+        self.title_bar.mouseMoveEvent = self._title_mouse_move
+        self.title_bar.mouseReleaseEvent = self._title_mouse_release
 
-        title_layout = QHBoxLayout(title_bar)
+        title_layout = QHBoxLayout(self.title_bar)
         title_layout.setContentsMargins(10, 0, 10, 0)
         title_layout.setSpacing(8)
 
         # 图标/标题
-        icon_label = QLabel("🎵")
+        icon_label = QLabel("📝")
         title_layout.addWidget(icon_label)
 
         title_label = QLabel("音乐标签编辑器")
         title_layout.addWidget(title_label)
 
-        # ===== 新增：菜单按钮 =====
+        # 菜单按钮
         self.btn_menu_file = QPushButton("文件")
         self.btn_menu_file.setObjectName("menuButton")
         self.btn_menu_file.setFixedSize(50, 28)
@@ -506,13 +595,12 @@ class MusicTagEditor(QMainWindow):
         self.btn_menu_help.clicked.connect(self._show_help_menu)
         title_layout.addWidget(self.btn_menu_help)
 
-        # ===== 新增：编码选择下拉框 =====
-        encoding_label = QLabel("编码(在标签出现乱码时请尝试切换):")
+        # 编码选择
+        encoding_label = QLabel("编码:")
         title_layout.addWidget(encoding_label)
 
         self.encoding_combo = QComboBox()
-        self.encoding_combo.setFixedWidth(110)
-        # 常用编码列表
+        self.encoding_combo.setFixedWidth(100)
         encodings = [
             "UTF-8",
             "GBK",
@@ -532,12 +620,30 @@ class MusicTagEditor(QMainWindow):
         self.encoding_combo.currentTextChanged.connect(self._on_encoding_changed)
         title_layout.addWidget(self.encoding_combo)
 
-        # 主题切换按钮
+        # 主题选择
         self.theme_combo = QComboBox()
         self.theme_combo.addItems(["亮色", "暗色"])
-        self.theme_combo.setFixedWidth(80)
+        self.theme_combo.setFixedWidth(70)
         self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
         title_layout.addWidget(self.theme_combo)
+
+        # ---------- 新增：透明度滑块 ----------
+        trans_label = QLabel("透明度:")
+        trans_label.setFixedWidth(45)
+        title_layout.addWidget(trans_label)
+
+        self.opacity_slider = QSlider(Qt.Horizontal)
+        self.opacity_slider.setFixedWidth(70)
+        self.opacity_slider.setRange(50, 100)      # 50% ~ 100%
+        self.opacity_slider.setSingleStep(1)
+        self.opacity_slider.setPageStep(5)
+        self.opacity_slider.setValue(85)           # 默认 0.85
+        self.opacity_slider.valueChanged.connect(self._on_opacity_changed)
+        title_layout.addWidget(self.opacity_slider)
+
+        self.opacity_label = QLabel("85%")
+        self.opacity_label.setFixedWidth(40)
+        title_layout.addWidget(self.opacity_label)
 
         title_layout.addStretch()
 
@@ -560,7 +666,7 @@ class MusicTagEditor(QMainWindow):
         self.btn_close.clicked.connect(self.close)
         title_layout.addWidget(self.btn_close)
 
-        main_layout.addWidget(title_bar)
+        main_layout.addWidget(self.title_bar)
 
         # ===== 内容区域 =====
         content_widget = QWidget()
@@ -621,7 +727,7 @@ class MusicTagEditor(QMainWindow):
         # ---------- 右：编辑面板 ----------
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
-        right_layout.setContentsMargins(10, 0, 0, 0)  # 左侧留出 10 像素空隙
+        right_layout.setContentsMargins(10, 0, 0, 0)
         right_layout.setSpacing(10)
 
         # 标签编辑
@@ -647,8 +753,7 @@ class MusicTagEditor(QMainWindow):
             edit_layout.addRow(label + ":", le)
         right_layout.addWidget(edit_group)
 
-        # ===== 修改：按钮分成两行 =====
-        # 使用垂直布局容纳两行按钮
+        # 按钮容器
         btn_container = QVBoxLayout()
         btn_container.setSpacing(6)
 
@@ -700,17 +805,14 @@ class MusicTagEditor(QMainWindow):
         info_layout.addRow("时长:", self.lbl_length)
         right_layout.addWidget(info_group)
 
-        # ===== 修改：日志文本框高度自适应 =====
+        # 日志文本框
         log_group = QGroupBox("操作日志")
         log_layout = QVBoxLayout(log_group)
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        # 移除最大高度限制，并设置拉伸策略
         self.log_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        # 不再 setMaximumHeight
         self.log_text.setStyleSheet("font-size: 11px; background: rgba(255,255,255,0.5);")
         log_layout.addWidget(self.log_text)
-        # 确保日志组在垂直方向上可以拉伸
         log_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         right_layout.addWidget(log_group)
 
@@ -723,14 +825,22 @@ class MusicTagEditor(QMainWindow):
         # 应用样式（圆角遮罩）
         self._update_mask()
 
+    # ---------- 事件过滤器：处理标题栏双击 ----------
+    def eventFilter(self, obj, event):
+        if obj == self.title_bar and event.type() == QEvent.MouseButtonDblClick:
+            self._toggle_maximize()
+            return True
+        return super().eventFilter(obj, event)
+
+    # ---------- 窗口拖动（最大化时禁用） ----------
     def _title_mouse_press(self, e):
-        if e.button() == Qt.LeftButton:
+        if e.button() == Qt.LeftButton and not self.isMaximized():
             self.drag_pos = e.globalPos()
             self.dragging = True
             e.accept()
 
     def _title_mouse_move(self, e):
-        if self.dragging:
+        if self.dragging and not self.isMaximized():
             self.move(self.pos() + e.globalPos() - self.drag_pos)
             self.drag_pos = e.globalPos()
             e.accept()
@@ -750,13 +860,11 @@ class MusicTagEditor(QMainWindow):
         QTimer.singleShot(10, self._update_mask)
 
     def _update_mask(self):
-        """为内容区域添加圆角遮罩（主窗口无边框透明背景）"""
         rect = self.rect()
         if rect.width() <= 0 or rect.height() <= 0:
             return
         path = QPainterPath()
         radius = 8
-        # 使用四个整数坐标参数，避免 QRectF 转换问题
         path.addRoundedRect(rect.x(), rect.y(), rect.width(), rect.height(), radius, radius)
         self.setMask(QRegion(path.toFillPolygon().toPolygon()))
 
@@ -764,33 +872,41 @@ class MusicTagEditor(QMainWindow):
         super().resizeEvent(e)
         self._update_mask()
 
+    # ---------- 主题 ----------
     def _on_theme_changed(self, idx):
         theme = 'dark' if idx == 1 else 'light'
         self.current_theme = theme
         self._apply_theme(theme)
+        self.save_settings()
 
     def _apply_theme(self, theme_name):
         self.current_theme = theme_name
         stylesheet = get_global_stylesheet(theme_name, self.bg_opacity)
         QApplication.instance().setStyleSheet(stylesheet)
-        # 更新组合框显示
+        # 更新组合框显示（不触发信号）
         idx = 0 if theme_name == 'light' else 1
         if self.theme_combo.currentIndex() != idx:
             self.theme_combo.blockSignals(True)
             self.theme_combo.setCurrentIndex(idx)
             self.theme_combo.blockSignals(False)
 
+    # ---------- 透明度 ----------
+    def _on_opacity_changed(self, value):
+        self.bg_opacity = value / 100.0
+        self.opacity_label.setText(f"{value}%")
+        # 重新应用样式（保持当前主题）
+        self._apply_theme(self.current_theme)
+        self.save_settings()
+
     # ---------- 编码切换 ----------
     def _on_encoding_changed(self, encoding: str):
-        """编码选择变化时更新当前编码，并提示用户重新加载"""
         self.current_encoding = encoding
         self.log_text.append(f"📝 编码已切换为: {encoding}，请重新加载文件以生效")
         self.status_label.setText(f"编码: {encoding}，请重新加载文件")
+        self.save_settings()
 
     # ---------- 菜单栏 ----------
     def _setup_actions(self):
-        """创建菜单动作（供标题栏菜单按钮使用）"""
-        # 文件菜单动作
         self.act_add_files = QAction("添加文件", self)
         self.act_add_files.triggered.connect(self.add_files)
         self.act_add_folder = QAction("添加文件夹", self)
@@ -800,13 +916,11 @@ class MusicTagEditor(QMainWindow):
         self.act_exit = QAction("退出", self)
         self.act_exit.triggered.connect(self.close)
 
-        # 编辑菜单动作
         self.act_save = QAction("保存当前", self)
         self.act_save.triggered.connect(self.save_current_file)
         self.act_save_all = QAction("保存所有", self)
         self.act_save_all.triggered.connect(self.save_all_files)
 
-        # 帮助菜单动作
         self.act_about = QAction("关于", self)
         self.act_about.triggered.connect(self.show_about)
 
@@ -987,9 +1101,7 @@ class MusicTagEditor(QMainWindow):
 
     # ---------- 保存核心 ----------
     def _save_tags_to_file(self, file_path, new_tags):
-        """统一写入函数：使用当前编码写入标签"""
         try:
-            # 对标签进行编码处理
             if self.current_encoding and self.current_encoding != 'UTF-8':
                 new_tags = encode_tags_for_save(new_tags, self.current_encoding)
 
@@ -999,7 +1111,6 @@ class MusicTagEditor(QMainWindow):
                 for key in list(song.tags.keys()):
                     if key not in new_tags:
                         del song.tags[key]
-            # 保存时解码回显示用格式（UTF-8）
             if self.current_encoding and self.current_encoding != 'UTF-8':
                 new_tags = decode_tags(new_tags, self.current_encoding)
             self.files_data[file_path]["tags"] = new_tags
@@ -1022,7 +1133,6 @@ class MusicTagEditor(QMainWindow):
 
     # ---------- 保存操作 ----------
     def save_current_file(self):
-        """保存当前选中的单个文件（UI → 缓存 + 磁盘）"""
         if not self.current_file:
             QMessageBox.warning(self, "提示", "请先选择一个文件")
             return
@@ -1033,7 +1143,6 @@ class MusicTagEditor(QMainWindow):
             self.status_label.setText(f"已保存: {os.path.basename(self.current_file)}")
 
     def save_to_selected_files(self):
-        """将 UI 标签保存到所有选中的文件（UI → 缓存 + 磁盘）"""
         rows = set()
         for item in self.table.selectedItems():
             rows.add(item.row())
@@ -1062,7 +1171,6 @@ class MusicTagEditor(QMainWindow):
         self.status_label.setText(f"已保存 {success_count} 个选中文件")
 
     def apply_to_all_selected(self):
-        """仅将 UI 应用到选中文件的缓存（暂存，不写磁盘）"""
         rows = set()
         for item in self.table.selectedItems():
             rows.add(item.row())
@@ -1074,7 +1182,6 @@ class MusicTagEditor(QMainWindow):
             QMessageBox.warning(self, "提示", "没有可应用的标签内容")
             return
 
-        # 仅更新缓存和表格
         for row in rows:
             file_path = self.table.item(row, 0).data(Qt.UserRole)
             if file_path and file_path in self.files_data:
@@ -1086,7 +1193,6 @@ class MusicTagEditor(QMainWindow):
         self.status_label.setText(f"已暂存 {len(rows)} 个文件")
 
     def save_all_files(self):
-        """将内存中所有文件的缓存写入磁盘（缓存 → 磁盘）"""
         if self.table.rowCount() == 0:
             QMessageBox.information(self, "提示", "列表为空")
             return
@@ -1102,7 +1208,6 @@ class MusicTagEditor(QMainWindow):
             if file_path and file_path in self.files_data:
                 tags = self.files_data[file_path].get("tags", {})
                 try:
-                    # 对标签进行编码处理
                     if self.current_encoding and self.current_encoding != 'UTF-8':
                         tags_to_write = encode_tags_for_save(tags, self.current_encoding)
                     else:
@@ -1121,7 +1226,6 @@ class MusicTagEditor(QMainWindow):
         self.status_label.setText(f"全部保存完成: 成功 {success} 个")
 
     def _collect_ui_tags(self):
-        """辅助函数：从界面收集非空标签"""
         new_tags = {}
         for key, le in self.tag_inputs.items():
             text = le.text().strip()
@@ -1130,15 +1234,12 @@ class MusicTagEditor(QMainWindow):
         return new_tags
 
     def reload_current_file(self):
-        """刷新整个列表：重新加载所有文件的标签（使用当前编码）"""
         if self.table.rowCount() == 0:
             QMessageBox.information(self, "提示", "列表为空，无需刷新")
             return
 
-        # 记录当前选中的文件路径
         current_selected = self.current_file
 
-        # 遍历所有行，重新读取标签
         for row in range(self.table.rowCount()):
             file_path = self.table.item(row, 0).data(Qt.UserRole)
             if not file_path or file_path not in self.files_data:
@@ -1146,12 +1247,10 @@ class MusicTagEditor(QMainWindow):
             try:
                 with taglib.File(file_path) as song:
                     tags = dict(song.tags)
-                    # 应用当前编码解码
                     if self.current_encoding and self.current_encoding != 'UTF-8':
                         tags = decode_tags(tags, self.current_encoding)
                     length = int(song.length) if song.length is not None else 0
                     self.files_data[file_path] = {"tags": tags, "length": length}
-                    # 更新表格行
                     self.table.item(row, 1).setText(tags.get("TITLE", [""])[0] or "")
                     self.table.item(row, 2).setText(tags.get("ARTIST", [""])[0] or "")
                     self.table.item(row, 3).setText(tags.get("ALBUM", [""])[0] or "")
@@ -1163,15 +1262,13 @@ class MusicTagEditor(QMainWindow):
             except Exception as e:
                 self.log_text.append(f"❌ 刷新失败: {os.path.basename(file_path)} - {str(e)}")
 
-        # 恢复选中状态
         if current_selected and current_selected in self.files_data:
             for row in range(self.table.rowCount()):
                 if self.table.item(row, 0).data(Qt.UserRole) == current_selected:
                     self.table.selectRow(row)
-                    self.on_file_selected()  # 触发右侧编辑区更新
+                    self.on_file_selected()
                     break
         else:
-            # 原选中的文件已不存在，清空右侧信息
             self.current_file = None
             self._clear_tag_inputs()
             self.lbl_path.setText("未选择文件")
@@ -1186,11 +1283,12 @@ class MusicTagEditor(QMainWindow):
         QMessageBox.about(
             self,
             "关于音乐标签编辑器",
-            "<h2>🎵 音乐标签编辑器</h2>"
+            "<h2>📝 音乐标签编辑器</h2>"
             "<p>基于 PyQt5 + pytaglib 开发</p>"
             "<p><b>支持格式：</b>MP3, FLAC, OGG, M4A, WMA, OPUS, WAV</p>"
             "</ul>"
-            "<p style='color:#888;'>版本 3.0.0</p>"
+            "<p style='color:#888;'>版本 3.1.0</p>"
+            "<p style='color:#888;'>Made by cYy</p>"
         )
 
     # ---------- 窗口关闭 ----------
@@ -1202,10 +1300,12 @@ class MusicTagEditor(QMainWindow):
                 if self.load_thread and self.load_thread.isRunning():
                     self.load_thread.cancel()
                     self.load_thread.wait()
+                self.save_settings()
                 e.accept()
             else:
                 e.ignore()
         else:
+            self.save_settings()
             e.accept()
 
 
@@ -1213,7 +1313,6 @@ class MusicTagEditor(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("音乐标签编辑器")
-    # 设置字体：优先使用 Microsoft YaHei，macOS 用 PingFang SC，通用备选
     font = QFont()
     font.setFamily("Microsoft YaHei, PingFang SC, Helvetica Neue, Segoe UI, sans-serif")
     font.setPointSize(9)
